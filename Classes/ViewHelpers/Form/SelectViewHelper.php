@@ -158,7 +158,9 @@ class Tx_Fluid_ViewHelpers_Form_SelectViewHelper extends Tx_Fluid_ViewHelpers_Fo
 				if ($this->hasArgument('optionValueField')) {
 					$key = Tx_Extbase_Reflection_ObjectAccess::getPropertyPath($value, $this->arguments['optionValueField']);
 					if (is_object($key)) {
-						if (method_exists($key, '__toString')) {
+						if ($key instanceof Tx_Extbase_DomainObject_AbstractEntity) {
+							$key = (integer)$key->getUid();
+						} elseif (method_exists($key, '__toString')) {
 							$key = (string)$key;
 						} else {
 							throw new Tx_Fluid_Core_ViewHelper_Exception('Identifying value for object of class "' . get_class($value) . '" was an object.' , 1247827428);
