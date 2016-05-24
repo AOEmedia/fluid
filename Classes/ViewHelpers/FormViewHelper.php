@@ -1,12 +1,12 @@
 <?php
 
 /*                                                                        *
- * This script is backported from the FLOW3 package "TYPO3.Fluid".        *
+ * This script belongs to the FLOW3 package "Fluid".                      *
  *                                                                        *
  * It is free software; you can redistribute it and/or modify it under    *
  * the terms of the GNU General Public License as published by the Free   *
  * Software Foundation, either version 3 of the License, or (at your      *
- *                                                                        *
+ * option) any later version.                                             *
  *                                                                        *
  * This script is distributed in the hope that it will be useful, but     *
  * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHAN-    *
@@ -50,6 +50,7 @@
  * </code>
  * This automatically inserts the value of {customer.name} inside the textbox and adjusts the name of the textbox accordingly.
  *
+ * @license http://opensource.org/licenses/gpl-license.php GNU Public License, version 2
  */
 class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_AbstractFormViewHelper {
 
@@ -62,6 +63,11 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	 * @var Tx_Extbase_Security_Channel_RequestHashService
 	 */
 	protected $requestHashService;
+
+	/**
+	 * @var Tx_Extbase_Security_Cryptography_HashService
+	 */
+	protected $hashService;
 
 	/**
 	 * @var Tx_Extbase_Service_ExtensionService
@@ -77,6 +83,11 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	protected $formActionUriArguments;
 
 	/**
+	 * @bool
+	 */
+	private $securedReferrerFieldRendered = false;
+
+	/**
 	 * @var Tx_Extbase_Configuration_ConfigurationManagerInterface
 	 */
 	protected $configurationManager;
@@ -86,9 +97,17 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	 *
 	 * @param Tx_Extbase_Security_Channel_RequestHashService $requestHashService The request hash service
 	 * @return void
+	 * @author Sebastian Kurfürst <sebastian@typo3.org>
 	 */
 	public function injectRequestHashService(Tx_Extbase_Security_Channel_RequestHashService $requestHashService) {
 		$this->requestHashService = $requestHashService;
+	}
+
+	/**
+	 * @param Tx_Extbase_Security_Cryptography_HashService $hashService
+	 */
+	public function injectHashService(Tx_Extbase_Security_Cryptography_HashService $hashService) {
+		$this->hashService = $hashService;
 	}
 
 	/**
@@ -166,6 +185,7 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 		$content .= $this->renderHiddenIdentityField($this->arguments['object'], $this->getFormObjectName());
 		$content .= $this->renderAdditionalIdentityFields();
 		$content .= $this->renderHiddenReferrerFields();
+		$content .= $this->renderHiddenSecuredReferrerField();
 		$content .= $this->renderRequestHashField(); // Render hmac after everything else has been rendered
 		$content .= chr(10) . '</div>' . chr(10);
 		$content .= $formContent;
@@ -214,6 +234,7 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	 * This happens if a form field is defined like property="bla.blubb" - then we might need an identity property for the sub-object "bla".
 	 *
 	 * @return string HTML-string for the additional identity properties
+	 * @author Sebastian Kurfürst <sebastian@typo3.org>
 	 */
 	protected function renderAdditionalIdentityFields() {
 		if ($this->viewHelperVariableContainer->exists('Tx_Fluid_ViewHelpers_FormViewHelper', 'additionalIdentityProperties')) {
@@ -245,14 +266,49 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[@extension]') . '" value="' . $extensionName . '" />' . chr(10);
 			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[@controller]') . '" value="' . $controllerName . '" />' . chr(10);
 			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[@action]') . '" value="' . $actionName . '" />' . chr(10);
-			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[arguments]') . '" value="' . htmlspecialchars(serialize($request->getArguments())) . '" />' . chr(10);
+			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[arguments]') . '" value="'
+				. htmlspecialchars($this->hashService->appendHmac(base64_encode(serialize($request->getArguments())))) . '" />' . chr(10);
 		} else {
 				// @deprecated since Extbase 1.4.0, will be removed with Extbase 1.6.0.
 			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[extensionName]') . '" value="' . $extensionName . '" />' . chr(10);
 			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[controllerName]') . '" value="' . $controllerName . '" />' . chr(10);
 			$result .= '<input type="hidden" name="' . $this->prefixFieldName('__referrer[actionName]') . '" value="' . $actionName . '" />' . chr(10);
 		}
+		$result .= $this->renderHiddenSecuredReferrerField();
+		return $result;
+	}
 
+	/**
+	 * Renders hidden form field for secured referrer information about the current controller and action.
+	 *
+	 * This method is called twice, to deal with subclasses of this class in a most compatible way
+	 *
+	 * @return string Hidden field with secured referrer information
+	 */
+	protected function renderHiddenSecuredReferrerField()
+	{
+		if ($this->securedReferrerFieldRendered) {
+			return '';
+		}
+		$request = $this->renderingContext->getControllerContext()->getRequest();
+		$extensionName = $request->getControllerExtensionName();
+		$controllerName = $request->getControllerName();
+		$actionName = $request->getControllerActionName();
+		if ($this->configurationManager->isFeatureEnabled('rewrittenPropertyMapper')) {
+			$actionRequest = array(
+				'@extension' => $extensionName,
+				'@controller' => $controllerName,
+				'@action' => $actionName,
+			);
+		} else {
+			$actionRequest = array(
+				'extensionName' => $extensionName,
+				'controllerName' => $controllerName,
+				'actionName' => $actionName,
+			);
+		}
+		$result = '<input type="hidden" name="' . $this->prefixFieldName('__referrer[@request]') . '" value="' . htmlspecialchars($this->hashService->appendHmac(serialize($actionRequest))) . '" />' . chr(10);
+		$this->securedReferrerFieldRendered = true;
 		return $result;
 	}
 
@@ -286,6 +342,7 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	 * If neither objectName nor name arguments have been set, NULL is returned.
 	 *
 	 * @return string specified Form name or NULL if neither $objectName nor $name arguments have been specified
+	 * @author Bastian Waidelich <bastian@typo3.org>
 	 */
 	protected function getFormObjectName() {
 		$formObjectName = NULL;
@@ -356,6 +413,7 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	 * Adds a container for form field names to the ViewHelperVariableContainer
 	 *
 	 * @return void
+	 * @author Sebastian Kurfürst <sebastian@typo3.org>
 	 */
 	protected function addFormFieldNamesToViewHelperVariableContainer() {
 		$this->viewHelperVariableContainer->add('Tx_Fluid_ViewHelpers_FormViewHelper', 'formFieldNames', array());
@@ -365,6 +423,7 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	 * Removes the container for form field names from the ViewHelperVariableContainer
 	 *
 	 * @return void
+	 * @author Sebastian Kurfürst <sebastian@typo3.org>
 	 */
 	protected function removeFormFieldNamesFromViewHelperVariableContainer() {
 		$this->viewHelperVariableContainer->remove('Tx_Fluid_ViewHelpers_FormViewHelper', 'formFieldNames');
@@ -374,6 +433,7 @@ class Tx_Fluid_ViewHelpers_FormViewHelper extends Tx_Fluid_ViewHelpers_Form_Abst
 	 * Render the request hash field
 	 *
 	 * @return string the hmac field
+	 * @author Sebastian Kurfürst <sebastian@typo3.org>
 	 */
 	protected function renderRequestHashField() {
 		$formFieldNames = $this->viewHelperVariableContainer->get('Tx_Fluid_ViewHelpers_FormViewHelper', 'formFieldNames');
